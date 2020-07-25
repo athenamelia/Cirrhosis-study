@@ -1,0 +1,1098 @@
+---
+title: "A study of Primary Biliary Cirrhosis with different approaches"
+author: "Amelia Tran"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# load packages
+library(JM)
+library(nlme)
+library(lme4)
+library(tidyverse)
+library(gridExtra)
+library(survival)
+library(survminer)
+library(gtsummary)
+library(forecast)
+library(gt)
+library(labelled)
+library(here)
+
+data(pbc2.id, package = "JM")
+pbc2.id$status2 <- as.numeric(pbc2.id$status != "alive")
+
+# histologic to factor
+pbc2$histologic <- factor(pbc2$histologic)
+pbc2.id$histologic <- factor(pbc2.id$histologic)
+
+# change status: alive + transplanted -> 1
+for (i in 1:length(pbc2$status)) {
+  if (pbc2$status[i] == "alive" || pbc2$status[i] == "transplanted") {
+    pbc2$status2[i] <- 0
+  } else{
+    pbc2$status2[i] <- 1
+  }
+}
+
+for (i in 1:length(pbc2.id$status)) {
+  if (pbc2.id$status[i] == "alive" || pbc2.id$status[i] == "transplanted") {
+    pbc2.id$status2[i] <- 0
+  } else{
+    pbc2.id$status2[i] <- 1
+  }
+}
+```
+
+### Data Overview:
+
+### Desciptions
+According to the $Joint \space\ Models \space\ for \space\ Longitudinal \space\ and \space\ Time-to-Event \space\ Data$ by Rizopoulos, Primary Biliary Cirrhosis is a "chronic, fatal, but rare liver disease characterized by inflammatory destruction of the small bile ducts within the liver, which eventually leads to cirrhosis of the liver". The dataset comes from a study conducted by the Mayo Clinic from 1974 to 1984 (Murtaugh et al., 1994) that includes 312 patients, 158 randomized to D-penicillamine and 154 to placebo. The outcome of primary interest was patient survival and whether D-penicillamine increased the survival probability. In addition, there were baseline covariates such as age and gender, and follow-up measurements for several biomarkers. These biomarkers included serum bilirubin, the presence of spiders (blood vessel malformations in the skin) and hepatomegaly (enlarged liver). We are interested in the association between these biomarkers and the survival outcome and identifying prognostic indicator of the disease progression. 
+
+The original clinical protocol for these patients specified visits at six months, one year, and annually thereafter. However, there are only 1945 observations of serum bilirubin in total due to death and censoring. By the end of the study 140 patients had died, 29 received a transplant, and 143 were still alive.
+
+\begin{table}[!h]
+\begin{tabular}{c c c c}
+\hline
+Dead & Transplanted & Alive & Total \\
+\hline
+140 & 29 & 143 & 312 \\
+\hline
+\end{tabular}
+\end{table}
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+pbc2_summary <- pbc2.id %>%
+  select(drug, sex, status2, years, age, ascites, hepatomegaly, spiders, edema, serBilir, 
+         albumin, alkaline, SGOT, platelets, prothrombin, histologic)
+
+for (i in 1:length(pbc2_summary$status2)) {
+  if (pbc2_summary$status2[i] == 0) {
+    pbc2_summary$status2[i] <- "alive"
+  } else{
+    pbc2_summary$status2[i] <- "dead"
+  }
+}
+
+for (i in 1:length(pbc2$status2)) {
+  if (pbc2$status2[i] == 0) {
+    pbc2$status_factor[i] <- "alive"
+  } else{
+    pbc2$status_factor[i] <- "dead"
+  }
+}
+
+# mean for continuous variables
+pbc2_summary %>% tbl_summary() %>%
+  bold_labels() %>% 
+  italicize_levels()
+
+
+quantile(pbc2_summary$age)
+quantile(pbc2_summary$serBilir)
+min(pbc2_summary$year)
+
+ggplot(pbc2_summary, aes(x=serBilir)) + 
+  geom_histogram(fill = "orange", aes(y=..density..), color = 'orange') + 
+  xlab("Baseline Biilrubin") + 
+  ylab("Count") +
+  ggtitle("Histogram of Baseline Bilirubin")
+```
+
+The patients were randomized almost equally with 51% of the patients in the treatment group and 49% in the placebo group. Among 312 patients in the study, 88% of them were females and only 12% were males. At the end of the study, 45% of the patients died; 55% of the patients were alive or transplanted. The average age is 50 and the average number of years between registration and the earlier of death, transplantion, or study analysis time is 6.3 years. 
+
+## Format
+The dataset consists of 1945 observations on the following 20 variables: ID, years, status, drug, age, sex, year, ascites, hepatomegaly, spiders, edema, serBilir, serChol, albumin, alkaline, SGOT, platelets, prothrombin, histologic, status2.
+
+Covariates:
+
+  * `id`: patients identifier; in total there are 312 patients.
+  * `years`: number of years between registration and the earlier of death, transplantion, or study analysis time.
+  * `drug`: a factor with levels placebo and D-penicil.
+  * `age`: at registration in years.
+  * `sex`: a factor with levels male and female.
+  * `year`: number of years between enrollment and this visit date, remaining values on the line of data refer to this visit.
+  * `ascites`: a factor with levels No and Yes.
+  * `hepatomegaly`: a factor with levels No and Yes.
+  * `spiders`: a factor with levels No and Yes.
+  * `edema`: a factor with levels No edema (i.e., no edema and no diuretic therapy for edema), edema no diuretics (i.e., edema present without diuretics, or edema resolved by diuretics), and edema despite diuretics (i.e., edema despite diuretic therapy).
+  * `serBilir`: serum bilirubin in mg/dl.
+  * `serChol`: serum cholesterol in mg/dl.
+  * `albumin`: albumin in gm/dl. 28 piecewiseExp.ph
+  * `alkaline`: alkaline phosphatase in U/liter.
+  * `SGOT`: SGOT in U/ml.
+  * `platelets`: platelets per cubic ml / 1000.
+  * `prothrombin`: prothrombin time in seconds.
+  * `histologic`: histologic stage of disease.
+  
+Response variable: 
+
+  * `status`: a factor with levels alive, transplanted and dead.
+  * `status2`: a numeric vector with the value 1 denoting if the patient was dead, and 0 if the patient was alive or transplanted.
+  
+### Data Exploration:
+
+These are exploratory plots to see if the distributions of the continuous covariates are normally distributed and if any data transformation is needed since normal distribution is one condition of the longitudinal data analysis. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# Histogram for continuous variables
+ggplot(data = pbc2.id, mapping = aes(x = age)) +
+  geom_histogram()
+```
+
+The distribution of age, unchanged over time, seems normally distributed. No transformation is needed. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# transform
+g1 <- ggplot(data = pbc2, mapping = aes(x = serBilir)) +
+  geom_histogram()
+
+serBilir_lambda <- BoxCox.lambda( pbc2$serBilir )
+transform_serBilir <- BoxCox(pbc2$serBilir, serBilir_lambda)
+
+g2 <- ggplot(data = pbc2, mapping = aes(x = transform_serBilir)) +
+  geom_histogram()
+grid.arrange(g1, g2, ncol = 2)
+```
+
+The `serBilir` variable is skewed right so Box Cox transformation is used. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# transform
+g3 <- ggplot(data = pbc2, mapping = aes(x = serChol)) +
+  geom_histogram()
+g4 <- ggplot(data = pbc2, mapping = aes(x = log(serChol))) +
+  geom_histogram()
+grid.arrange(g3, g4, ncol = 2)
+```
+
+The `serChol` variable is skewed right so log transformation is used. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+ggplot(data = pbc2, mapping = aes(x = albumin)) +
+  geom_histogram()
+```
+
+The distribution of `albumin` seems normally distributed. No transformation is needed. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# transform
+g5 <- ggplot(data = pbc2, mapping = aes(x = alkaline)) +
+  geom_histogram()
+g6 <- ggplot(data = pbc2, mapping = aes(x = log(alkaline))) +
+  geom_histogram()
+grid.arrange(g5, g6, ncol = 2)
+```
+
+The `alkaline` variable is skewed right so log transformation is used. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# transform
+g7 <- ggplot(data = pbc2, mapping = aes(x = SGOT)) +
+  geom_histogram()
+g8 <- ggplot(data = pbc2, mapping = aes(x = log(SGOT))) +
+  geom_histogram()
+grid.arrange(g7, g8, ncol = 2)
+```
+
+The `SGOT` variable is skewed right so log transformation is used. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# transform
+g9 <- ggplot(data = pbc2, mapping = aes(x = platelets)) +
+  geom_histogram()
+g10 <- ggplot(data = pbc2, mapping = aes(x = log(platelets))) +
+  geom_histogram()
+grid.arrange(g9, g10, ncol = 2)
+```
+
+The `SGOT` variable is skewed right so log transformation is used. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# transform
+g11 <- ggplot(data = pbc2, mapping = aes(x = prothrombin)) +
+  geom_histogram()
+
+prothrombin_lambda <- BoxCox.lambda( pbc2$prothrombin )
+transform_prothrombin <- BoxCox(pbc2$prothrombin, prothrombin_lambda)
+
+g12 <- ggplot(mapping = aes(x = transform_prothrombin)) +
+  geom_histogram()
+
+grid.arrange(g11, g12, ncol = 2)
+```
+
+The `prothrombin` variable is skewed right so Box Cox transformation is used.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# transform dataset
+pbc2_merge <- merge(pbc2.id, pbc2, by = "id", sort = FALSE)
+
+pbc2_transform <- pbc2 %>%
+  mutate(
+    serBilir = transform_serBilir,
+    serChol = log(serChol),
+    alkaline = log(alkaline), 
+    SGOT = log(SGOT),
+    platelets = log(platelets),
+    prothrombin = log(prothrombin),
+    serBilir_baseline = BoxCox(pbc2_merge[,"serBilir.x"], serBilir_lambda),
+    serChol_baseline = log(pbc2_merge[,"serChol.x"]),
+    albumin_baseline = pbc2_merge[,"albumin.x"],
+    alkaline_baseline = log(pbc2_merge[,"alkaline.x"]),
+    SGOT_baseline = log(pbc2_merge[,"SGOT.x"]),
+    platelets_baseline = log(pbc2_merge[,"platelets.x"]),
+    prothrombin_baseline = log(pbc2_merge[,"prothrombin.x"])
+  )
+```
+
+After the transformation, boxplots are used to detect any potential outliers and make comparisons between groups for categorical covariates. This is also useful to check potential confounders. It is interesting to see how the biomarker Serum Bilirubin, Serum Cholesterol, albumin and platelets differ in sexes and different treatment groups.  
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# sex 
+b1 <- ggplot(data = pbc2_transform, mapping = aes(x = sex, y = serBilir)) +
+  geom_boxplot() 
+b2 <- ggplot(data = pbc2_transform, mapping = aes(x = sex, y = serChol)) +
+  geom_boxplot()
+b3 <- ggplot(data = pbc2_transform, mapping = aes(x = sex, y = albumin)) +
+  geom_boxplot()
+b4 <- ggplot(data = pbc2_transform, mapping = aes(x = sex, y = platelets)) +
+  geom_boxplot()
+
+grid.arrange(b1, b2, ncol = 2)
+grid.arrange(b3, b4, ncol = 2)
+```
+
+From the boxplot, males have higher Serum Bilirubin than females. Both males and females have roughly equal level of Serum Cholesterol and albumin, with females having more outliers. Generally, females have higher platelets than males.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# drug
+b5 <- ggplot(data = pbc2.id, mapping = aes(x = drug, y = serBilir)) +
+  geom_boxplot()
+
+b5 <- ggplot(data = pbc2.id, mapping = aes(x = drug, y = serBilir)) +
+  geom_boxplot()
+
+b6 <- ggplot(data = pbc2_transform, mapping = aes(x = drug, y = serChol)) +
+  geom_boxplot()
+b7 <- ggplot(data = pbc2_transform, mapping = aes(x = drug, y = albumin)) +
+  geom_boxplot()
+b8 <- ggplot(data = pbc2_transform, mapping = aes(x = drug, y = platelets)) +
+  geom_boxplot()
+
+grid.arrange(b5, b6, ncol = 2)
+grid.arrange(b7, b8, ncol = 2)
+```
+
+Generally, patients in both treatment groups have the same levels of Serum Bilirubin, Serum Cholesterol, albumin and platelets. Both groups have many outliers in the Serum Cholesterol, albumin and platelets measurements. 
+
+### Survival Analysis
+
+After describing the data, Kaplan-Meier survival curve is used to visualize the survival probability of 312 patients with regards to the categorical covariates over time. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# Kaplan-Meier method
+surv_object <- Surv(time = pbc2.id$years, event = pbc2.id$status2)
+
+fit0 <- survfit(formula = surv_object ~ 1, data = pbc2.id)
+# summary(fit0)
+ggsurvplot(fit0, data = pbc2.id, conf.int = TRUE, risk.table = TRUE, 
+           xlab = "Time in years", surv.median.line = "hv", xlim = c(0, 14), break.x.by = 2, 
+           title = "Overall survival probability")
+```
+
+From the general Kaplan-Meier curve above, the median survival time is 9 years. Around 5 years since the initiation of the study, the survival probability is around 0.7 while the survival probability is about 0.46 after 10 years. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+#sex
+fit1 <- survfit(formula = surv_object ~ sex, data = pbc2.id)
+# summary(fit1)
+ggsurvplot(fit1, data = pbc2.id, conf.int = TRUE, risk.table = TRUE, pval = TRUE, 
+           xlab = "Time in years", surv.median.line = "hv", risk.table.height = 0.3, xlim = c(0, 14), break.x.by = 2, 
+           title = "Sex")
+```
+
+The log-rank p-value of 0.0024 indicates that `sex` is statistically significant at the significance level $\alpha = 0.10$. In this study, females have higher survival probability than males generally. Specifically, the median survival time for females is 9.8 years while 4.6 years for males. 10 years after the first observations, the survival probability is around 0.48 for females, and 0.28 for males.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# drug
+fit2 <- survfit(formula = surv_object ~ drug, data = pbc2.id)
+# summary(fit2)
+ggsurvplot(fit2, data = pbc2.id, conf.int = TRUE, risk.table = TRUE, pval = TRUE, 
+           xlab = "Time in years", surv.median.line = "hv", risk.table.height = 0.3, xlim = c(0, 14), break.x.by = 2, 
+           title = "Treatment effect")
+```
+
+`D-penicilin` is not significantly significant as the p-value = 0.99. The survival time of the placebo and treatment groups are roughly the same, 9.3 years for two groups. The confidence intervals for the two groups match too, indicating that there is no difference in the survival outcome between the two groups. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# ascites
+fit3 <- survfit(formula = surv_object ~ ascites, data = pbc2.id)
+# summary(fit3)
+ggsurvplot(fit3, data = pbc2.id, conf.int = TRUE, risk.table = TRUE, pval = TRUE, 
+           xlab = "Time in years", surv.median.line = "hv", risk.table.height = 0.3, xlim = c(0, 14), break.x.by = 2, title = "Ascites")
+```
+
+`ascites` is statistically significant to the survival outcome based on the small p-value < 0.0001. In the graph, there is a huge discrepancy between the survival probability curves of the two groups. Specifically, the median survival time for patients with no ascites is at 10 years while 0.95 year for patients with ascites. At 5 years, the survival probabilities for patients with and without ascites are 0.14 and 0.75 respectively. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# hepatomegaly
+fit4 <- survfit(formula = surv_object ~ hepatomegaly, data = pbc2.id)
+# summary(fit4)
+ggsurvplot(fit4, data = pbc2.id, conf.int = TRUE, risk.table = TRUE, pval = TRUE, 
+           xlab = "Time in years", surv.median.line = "hv", risk.table.height = 0.3, xlim = c(0, 14), break.x.by = 2, title = "Hepatomegaly")
+```
+
+The small p-value < 0.0001 indicates that `hepatomegaly` is statistically significant. Patients without hepatomegaly has a much higher survival probability than the patients without hepatomegaly. Specfically, the median survival times for patients with and without hepatomegaly are 6 years and 13 years.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# spiders
+fit5 <- survfit(formula = surv_object ~ spiders, data = pbc2.id)
+# summary(fit5)
+ggsurvplot(fit5, data = pbc2.id, conf.int = TRUE, risk.table = TRUE, pval = TRUE, 
+           xlab = "Time in years", surv.median.line = "hv", risk.table.height = 0.3, xlim = c(0, 14), break.x.by = 2, title = "Spiders")
+```
+
+`spiders` is statistically significant to the survival outcome based on the small p-value < 0.0001. In the graph, there is a huge discrepancy between the survival time of the two groups. Specifically, the median survival time for patients with no spiders is at 10.5 years while around 5 years for patients with spiders. At 5 years, the survival probabilities for patients with and without spiders are 0.50 and 0.78 respectively. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# edema
+fit6 <- survfit(formula = surv_object ~ edema, data = pbc2.id)
+# summary(fit6)
+ggsurvplot(fit6, data = pbc2.id, conf.int = TRUE, risk.table = TRUE, pval = TRUE, 
+           xlab = "Time in years", surv.median.line = "hv", risk.table.height = 0.33, xlim = c(0, 14), break.x.by = 2, title = "Edema")
+```
+
+`edema` is significantly significant as the p-value < 0.0001. The survival probability curves are different for three groups. The median survival probabilities for patients with `no edema`, `edema no diuretics`, and `edema des` are at around 10.5 years, 8.4 years, and 0.65 years respectively. At 10 years, the survival time for patients with `no edema`, `edema no diuretics`, and `edema des` are 0.53, 0.31 and 0 respectively. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# histologic
+fit7 <- survfit(formula = surv_object ~ histologic, data = pbc2.id)
+# summary(fit7)
+ggsurvplot(fit7, data = pbc2.id, conf.int = TRUE, risk.table = TRUE, pval = TRUE, 
+           xlab = "Time in years", surv.median.line = "hv", risk.table.height = 0.38, xlim = c(0, 14), break.x.by = 2, 
+           title = "Histologic")
+```
+
+The small p-value < 0.0001 indicates that `histologic` is statistically significant. Specfically, the median survival time for histologic level 1, level 2, level 3, level 4 are not reached, 11 years, 9.3 years and 4.37 years respectively.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# age
+pbc2.id <- pbc2.id %>% 
+  mutate(age_group = ifelse(age >= 60, "old", 
+                    ifelse(age <= 40, "young", "middle-aged")))
+pbc2.id$age_group <- factor(pbc2.id$age_group)
+
+fit8 <- survfit(formula = surv_object ~ age_group, data = pbc2.id)
+# summary(fit8)
+ggsurvplot(fit8, data = pbc2.id, conf.int = TRUE, risk.table = TRUE, pval = TRUE, 
+           xlab = "Time in years", surv.median.line = "hv", risk.table.height = 0.33, xlim = c(0, 14), break.x.by = 2)
+```
+
+The approximately normal distribution of age suggests cutoffs at 40 and 60 years. The small p-value < 0.0001 indicates that `age_group` is statistically significant. Old patients has the lowest survival probability compared to middle-aged and young patients. Specfically, the median survival time for old, middle-aged and young patients are 4.9 years, 10.3 years and more than 9.4 years respectively. At the time point of 10 years, the survival probabilities for old, middle-aged and young patients are 0.17, 0.52, 0.65 respectively.
+
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# bilirubin
+pbc2.id <- pbc2.id %>% 
+  mutate(bilirubin = ifelse(serBilir >= 1.2, "high > 1.2 ", "normal <= 1.2"))
+
+fit9 <- survfit(formula = surv_object ~ bilirubin, data = pbc2.id)
+# summary(fit8)
+ggsurvplot(fit9, data = pbc2.id, conf.int = TRUE, risk.table = TRUE, pval = TRUE, 
+           xlab = "Time in years", surv.median.line = "hv", risk.table.height = 0.33, xlim = c(0, 14), break.x.by = 2, 
+           title = "Baseline Bilirubin")
+```
+
+
+Since the datasets pbc2.id includes 28 missing values (28 patients) for `serChol`and 4 missing values (4 patients) for `platelets` out of 312 patients, and pbc2 includes 195 missing values for `serChol_baseline` and `platelets_baseline`, analyses will be carried with excluding `serChol` from the two Cox models, and remove the missingness for `platetlets`.
+
+#### Cox proportional hazards model
+### Univariable Cox models
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+uv_cox_fit <- tbl_uvregression(
+  pbc2.id[c("drug", "age", "sex", "serBilir","albumin", "alkaline", "SGOT", "platelets", 
+            "prothrombin", "ascites", "hepatomegaly", "spiders", "edema", "histologic")],
+  method = coxph,
+  y = Surv(pbc2.id$years, pbc2.id$status2),
+  exponentiate = TRUE
+)
+
+uv_cox_fit %>%
+  add_global_p() %>%
+  bold_labels() 
+```
+
+Based on the summary table of p-values for the Univariable models fitting each of the corresponding covariate,`drug` is the only variable that has the p-value higher than the significance level of 0.10. Thus, `drug` is not included in the multivariable model. 
+
+### Variable Selection for Cox Regression Model
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+#summary(pbc2.id) # platelets and serChol missing
+
+# complete case analysis - remove missingness for platelets
+pbc2.id_complete_case <- pbc2.id[!is.na(pbc2.id$platelets),]
+
+# backward selection without drug 
+cox_fit1 <- coxph(Surv(years, status2) ~ platelets + serBilir + albumin + alkaline + SGOT + prothrombin +
+                  age + sex + ascites + hepatomegaly + spiders + edema + histologic, data = pbc2.id_complete_case)
+summary(cox_fit1)
+drop1(cox_fit1, test = "Chisq") # drop alkaline with p-value 0.9245082 
+
+cox_fit2 <- coxph(Surv(years, status2) ~ platelets + serBilir + albumin + SGOT + prothrombin +
+                  age + sex + ascites + hepatomegaly + spiders + edema + histologic, data = pbc2.id_complete_case)
+drop1(cox_fit2, test = "Chisq") # drop spiders with p-value 0.7176748   
+
+cox_fit3 <- coxph(Surv(years, status2) ~ platelets + serBilir + albumin + SGOT + prothrombin +
+                  age + sex + ascites + hepatomegaly + edema + histologic, data = pbc2.id_complete_case)
+drop1(cox_fit3, test = "Chisq") # drop platelets with p-value 0.4968202 
+
+cox_fit4 <- coxph(Surv(years, status2) ~ serBilir + albumin + SGOT + prothrombin +
+                  age + sex + ascites + hepatomegaly + edema + histologic, data = pbc2.id_complete_case)
+drop1(cox_fit4, test = "Chisq") # drop ascites with p-value of 0.5098511  
+
+cox_fit5 <- coxph(Surv(years, status2) ~ serBilir + albumin + SGOT + prothrombin +
+                  age + sex + hepatomegaly + edema + histologic, data = pbc2.id_complete_case)
+drop1(cox_fit5, test = "Chisq") # drop hepatomegaly with p-value of 0.1757678
+
+cox_fit6 <- coxph(Surv(years, status2) ~ serBilir + albumin + SGOT + prothrombin +
+                  age + sex + histologic + edema, data = pbc2.id_complete_case)
+drop1(cox_fit6, test = "Chisq") # drop sex with p-value of 0.0618493
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# forward selection
+cox_fit1 <- coxph(Surv(years, status2) ~ serBilir, data = pbc2.id_complete_case)
+add1(cox_fit1, ~ drug + serBilir + albumin + alkaline + SGOT + prothrombin + age + sex + ascites +
+       hepatomegaly + spiders + edema + histologic, test = "Chisq") # add histologic with p-value of 4.102e-10
+
+cox_fit2 <- coxph(Surv(years, status2) ~ serBilir + histologic, data = pbc2.id_complete_case)
+add1(cox_fit2, ~ drug + serBilir + albumin + alkaline + SGOT + prothrombin + age + sex + ascites +
+       hepatomegaly + spiders + edema + histologic, test = "Chisq") # add age with p-value of 4.633e-06
+
+cox_fit3 <- coxph(Surv(years, status2) ~ serBilir + histologic + age, data = pbc2.id_complete_case)
+add1(cox_fit3, ~ drug + serBilir + albumin + alkaline + SGOT + prothrombin + age + sex + ascites +
+       hepatomegaly + spiders + edema + histologic, test = "Chisq") # add prothrombin with p-value of 6.480e-05
+
+cox_fit4 <- coxph(Surv(years, status2) ~ serBilir + histologic + age + prothrombin, data = pbc2.id_complete_case)
+add1(cox_fit4, ~ drug + serBilir + albumin + alkaline + SGOT + prothrombin + age + sex + ascites +
+       hepatomegaly + spiders + edema + histologic, test = "Chisq") # add albumin with p-value of 0.0002209
+
+cox_fit5 <- coxph(Surv(years, status2) ~ serBilir + histologic + age + prothrombin + albumin, data = pbc2.id_complete_case)
+add1(cox_fit5, ~ drug + serBilir + albumin + alkaline + SGOT + prothrombin + age + sex + ascites +
+       hepatomegaly + spiders + edema + histologic, test = "Chisq") # add edema with p-value of 0.01472
+
+cox_fit6 <- coxph(Surv(years, status2) ~ serBilir + histologic + age + prothrombin + albumin + edema, data = pbc2.id_complete_case)
+add1(cox_fit6, ~ drug + serBilir + albumin + alkaline + SGOT + prothrombin + age + sex + ascites +
+       hepatomegaly + spiders + edema + histologic, test = "Chisq") # add SGOT with p-value of 0.02093
+
+cox_fit7 <- coxph(Surv(years, status2) ~ serBilir + histologic + age + prothrombin + albumin + edema + SGOT, data = pbc2.id_complete_case)
+add1(cox_fit7, ~ drug + serBilir + albumin + alkaline + SGOT + prothrombin + age + sex + ascites +
+       hepatomegaly + spiders + edema + histologic, test = "Chisq")
+```
+
+After the backward and forward stepwise variable selection, the subset of statistically significant covariates include serBilir, albumin, SGOT, prothrombin, age, sex, edema, and histologic. These covariates will be included in the final multivariable Cox model.
+
+### Multivariable Cox model
+  
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# Cox proportional hazards model
+coxFit <- coxph(Surv(years, status2) ~ serBilir + albumin + age + edema + histologic + SGOT + prothrombin, data = pbc2.id)
+
+# summary(coxFit)
+ggforest(coxFit, data = pbc2.id, fontsize = 0.55)
+
+coxFit %>%
+  tbl_regression(exponentiate = TRUE) %>%
+  add_global_p() %>%
+  bold_labels() %>%
+  italicize_levels()  %>%
+  as_kable(caption = "Multivariable Cox Model")
+```
+
+Based on the hazard ratio table, the baseline measurements of `serBilir`, `albumin`, `prothrombin`, `SGOT`, and `age` are statistically significant since their p-values are smaller than 0.10. Specifically, the very small p-values of `serBilir`, `age`, and `prothrombin` indicate that there is a strong covariate association between these variables and the survival outcome. For categorical variables, `edema` and `histologic` significantly influences the patients' risk of death in this study with the p-value of 0.014.
+
+### Test the Proportional Hazards Assumption of a Cox Regression
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+cox.zph(coxFit)
+```
+
+We test proportionality of all the predictors in the model. A global p-value of 0.4005 indicates that in general, the proportionality assumption is not violated.
+
+### Extended Cox model for time-dependent covariates
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+create_time <- function(year, years, status) {
+  start <- list()
+  stop <- list()
+  event <- list()
+  index <- 1
+  
+  for (i in 1:(length(year) - 1)) {
+    if ((year[i] == 0 && year[i+1] != 0) || (year[i] != 0 && year[i+1] != 0)) {
+      start[index] <- year[i]
+      stop[index] <- year[i+1]
+      
+      if (status[i] == 1) {
+        event[index] <- 0
+      }
+      else {
+        event[index] <- status[i]
+      }
+    }
+    
+    else if ((year[i] == 0 && year[i+1] == 0) || (year[i] != 0 && year[i+1] == 0)) {
+      start[index] <- year[i]
+      stop[index] <- years[i]
+      event[index] <- status[i]
+    }
+    index <- index + 1
+  }
+  
+  start[index] <- year[i+1]
+  stop[index] <- years[i+1]
+  event[index] <- status[i+1]
+  return(list(start, stop, event))
+}
+```
+ 
+### Data for extended Cox
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+result <- create_time(pbc2$year, pbc2$years, pbc2$status2)
+start <- as.vector(unlist(result[[1]]))
+stop <- as.vector(unlist(result[[2]])) 
+event <- as.vector(unlist(result[[3]])) 
+
+pbc2_visit_time <- pbc2
+pbc2_visit_time$start <- start
+pbc2_visit_time$end <- stop
+pbc2_visit_time$event <- event
+
+# data modification
+pbc2_visit_time_merge <- merge(pbc2.id, pbc2_visit_time, by = "id", sort = FALSE)
+
+# obstain baseline values
+pbc2_visit_time <- pbc2_visit_time %>%
+  mutate(
+    albumin_baseline = pbc2_visit_time_merge[,"albumin.x"],
+    serBilir_baseline = pbc2_visit_time_merge[,"serBilir.x"],
+    serChol_baseline = pbc2_visit_time_merge[,"serChol.x"],
+    alkaline_baseline = pbc2_visit_time_merge[,"alkaline.x"],
+    SGOT_baseline = pbc2_visit_time_merge[,"SGOT.x"],
+    platelets_baseline = pbc2_visit_time_merge[,"platelets.x"],
+    prothrombin_baseline = pbc2_visit_time_merge[,"prothrombin.x"],
+    ascites_baseline = pbc2_visit_time_merge[,"ascites.x"],
+    hepatomegaly_baseline = pbc2_visit_time_merge[,"hepatomegaly.x"],
+    spiders_baseline = pbc2_visit_time_merge[,"spiders.x"],
+    edema_baseline = pbc2_visit_time_merge[,"edema.x"],
+    histologic_baseline = pbc2_visit_time_merge[,"histologic.x"]
+  )
+```
+
+### Univariable Analysis of the time-dependent Cox
+
+ascites__               |1885  |       |           |<0.001      |
+|No                        |      |       |           |            |
+|Yes                       |      |12.4   |8.11, 18.9 |            |
+|__hepatomegaly__          |1884  |       |           |<0.001      |
+|No                        |      |       |           |            |
+|Yes                       |      |3.65   |2.22, 6.01 |            |
+|__spiders__               |1887  |       |           |<0.001      |
+|No                        |      |       |           |            |
+|Yes                       |      |4.25   |2.76, 6.56 |            |
+|__edema__                 |1945  |       |           |<0.001      |
+|No edema                  |      |       |           |            |
+|edema no diuretics        |      |4.01   |2.61, 6.16 |            |
+|edema despite diuretics   |      |16.5   |10.9, 24.8 |            |
+|__serBilir__              |1945  |1.16   |1.14, 1.18 |<0.001      |
+|__serChol__               |1124  |1.00   |1.00, 1.00 |0.8         |
+|__albumin__               |1945  |0.10   |0.07, 0.13 |<0.001      |
+|__alkaline__              |1885  |1.00   |1.00, 1.00 |0.4         |
+|__SGOT__                  |1945  |1.00   |1.00, 1.00 |<0.001      |
+|__platelets__             |1872  |0.99   |0.99, 1.00 |<0.001      |
+|__prothrombin__           |1945  |1.28   |1.23, 1.32 |<0.001      |
+|__histologic__ 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+uv_td_cox_fit <- tbl_uvregression(
+  pbc2_visit_time %>% select(c(-id, -years, -status, -year, -status2, -start, -end, -event, -ascites, -hepatomegaly, -status_factor,
+       -serChol_baseline, -spiders, -edema, -serBilir_baseline, -serChol, -albumin, -alkaline, -SGOT, -platelets, -prothrombin, -histologic)),
+   method = coxph,
+  y = Surv(pbc2_visit_time$start, pbc2_visit_time$end, pbc2_visit_time$event),
+  exponentiate = TRUE
+)
+
+uv_td_cox_fit %>%
+  add_global_p() %>%
+  bold_labels()  %>%
+  as_kable(caption = "Univariable extended Cox Model")
+```
+
+From the summary output, `drug` is not statistically significant at the level of 0.1. All the baseline covariates are. 
+
+### Complete Case Analysis for extended Cox
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# summary(pbc2_visit_time) # platelets_baseline and serChol_baseline missing
+
+# complete case analysis - remove missingness for platelets
+pbc2_visit_time_complete_case <- pbc2_visit_time[!is.na(pbc2_visit_time$platelets_baseline), ]
+
+result1 <- create_time(pbc2_visit_time_complete_case$year, pbc2_visit_time_complete_case$years, pbc2_visit_time_complete_case$status2)
+start1 <- as.vector(unlist(result1[[1]]))
+stop1 <- as.vector(unlist(result1[[2]])) 
+event1 <- as.vector(unlist(result1[[3]])) 
+
+pbc2_visit_time_complete_case$start1 <- start1
+pbc2_visit_time_complete_case$end1 <- stop1
+pbc2_visit_time_complete_case$event1 <- event1
+```
+
+Since the dataset contains the missing values, we use last measurement values carried forward for Bilirubin, and remove the missing data for platelets. We remove 4 patients with 44 missing platelets measurements. 
+
+### Variable Selection for extended Cox model
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# backward selection
+td_cox1 <- coxph(Surv(start1, stop1, event1) ~ platelets_baseline + serBilir + albumin_baseline +
+                   alkaline_baseline + SGOT_baseline + prothrombin_baseline + ascites_baseline + age + sex + 
+                   hepatomegaly_baseline + spiders_baseline + edema_baseline + histologic_baseline, data = pbc2_visit_time_complete_case)
+drop1(td_cox1, test = "Chisq") # drop ascites_baseline with p-value of 0.828480 
+
+cox_fit2 <- coxph(Surv(start1, stop1, event1) ~ platelets_baseline + serBilir + albumin_baseline +
+                   alkaline_baseline + SGOT_baseline + prothrombin_baseline + age + sex + 
+                   hepatomegaly_baseline + spiders_baseline + edema_baseline + histologic_baseline, data = pbc2_visit_time_complete_case)
+drop1(cox_fit2, test = "Chisq") # drop spiders_baseline with p-value of 0.696068
+
+cox_fit3 <- coxph(Surv(start1, stop1, event1) ~ platelets_baseline + serBilir + albumin_baseline +
+                   alkaline_baseline + SGOT_baseline + prothrombin_baseline + age + sex + 
+                   hepatomegaly_baseline + edema_baseline + histologic_baseline, data = pbc2_visit_time_complete_case)
+drop1(cox_fit3, test = "Chisq") # drop alkaline_baseline with p-value of 0.604864  
+
+cox_fit4 <- coxph(Surv(start1, stop1, event1) ~ platelets_baseline + serBilir + albumin_baseline +
+                   SGOT_baseline + prothrombin_baseline + age + sex + 
+                   hepatomegaly_baseline + edema_baseline + histologic_baseline, data = pbc2_visit_time_complete_case)
+drop1(cox_fit4, test = "Chisq") # drop hepatomegaly_baseline with p-value of 0.577356  
+
+cox_fit5 <- coxph(Surv(start1, stop1, event1) ~ platelets_baseline + serBilir + albumin_baseline +
+                   SGOT_baseline + prothrombin_baseline + age + sex + 
+                   edema_baseline + histologic_baseline, data = pbc2_visit_time_complete_case)
+drop1(cox_fit5, test = "Chisq") # drop prothrombin_baseline with p-value 0.4048648 
+
+cox_fit6 <- coxph(Surv(start1, stop1, event1) ~ platelets_baseline + serBilir + albumin_baseline +
+                   SGOT_baseline + age + sex + edema_baseline + histologic_baseline, data = pbc2_visit_time_complete_case)
+drop1(cox_fit6, test = "Chisq") # drop SGOT_baseline with p-value 0.2043608 
+
+cox_fit7 <- coxph(Surv(start1, stop1, event1) ~ platelets_baseline + serBilir + albumin_baseline +
+                   age + sex + edema_baseline + histologic_baseline, data = pbc2_visit_time_complete_case)
+drop1(cox_fit7, test = "Chisq") # drop platelets_baseline with p-value 0.254760   
+
+cox_fit8 <- coxph(Surv(start1, stop1, event1) ~ serBilir + albumin_baseline +
+                   age + sex + edema_baseline + histologic_baseline, data = pbc2_visit_time_complete_case)
+drop1(cox_fit8, test = "Chisq") # drop sex with p-value 0.1069981
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# backward selection
+td_cox1 <- coxph(Surv(start1, stop1, event1) ~ serBilir, data = pbc2_visit_time_complete_case)
+add1(td_cox1, ~ drug + serBilir + albumin_baseline + SGOT_baseline + prothrombin_baseline + ascites_baseline + age + sex +
+       platelets_baseline + edema_baseline + histologic_baseline + spiders_baseline + hepatomegaly_baseline + 
+       alkaline_baseline, test = "Chisq") # add age < 2.2e-16 
+
+td_cox2 <- coxph(Surv(start1, stop1, event1) ~ serBilir + age, data = pbc2_visit_time_complete_case)
+add1(td_cox2, ~ drug + serBilir + albumin_baseline + SGOT_baseline + prothrombin_baseline + ascites_baseline + age + sex +
+       platelets_baseline + edema_baseline + histologic_baseline + spiders_baseline + hepatomegaly_baseline + 
+       alkaline_baseline, test = "Chisq") # add histologic_baseline 3.441e-09
+
+td_cox3 <- coxph(Surv(start1, stop1, event1) ~ serBilir + histologic_baseline + age, data = pbc2_visit_time_complete_case)
+add1(td_cox3, ~ drug + serBilir + albumin_baseline + SGOT_baseline + prothrombin_baseline + ascites_baseline + age + sex +
+       platelets_baseline + edema_baseline + histologic_baseline + spiders_baseline + hepatomegaly_baseline + 
+       alkaline_baseline, test = "Chisq") # add edema_baseline 9.46e-05
+
+td_cox4 <- coxph(Surv(start1, stop1, event1) ~ serBilir + histologic_baseline + age + edema_baseline, data = pbc2_visit_time_complete_case)
+add1(td_cox4, ~ drug + serBilir + albumin_baseline + SGOT_baseline + prothrombin_baseline + ascites_baseline + age + sex +
+       platelets_baseline + edema_baseline + histologic_baseline + spiders_baseline + hepatomegaly_baseline + 
+       alkaline_baseline, test = "Chisq") # add albumin_baseline 0.0592
+
+td_cox5 <- coxph(Surv(start1, stop1, event1) ~ serBilir + histologic_baseline + age + edema_baseline + albumin_baseline, 
+                  data = pbc2_visit_time_complete_case)
+add1(td_cox5, ~ drug + serBilir + albumin_baseline + SGOT_baseline + prothrombin_baseline + ascites_baseline + age + sex +
+       platelets_baseline + edema_baseline + histologic_baseline + spiders_baseline + hepatomegaly_baseline + 
+       alkaline_baseline, test = "Chisq") 
+```
+
+After backward and forward stepwise selection starting with the multivariable model with no `drug`, the subset of statistically significant covariates include serBilir, albumin_baseline, age, sex, edema_baseline, and histologic_baseline. These covariates will be included in the final multivariable Cox model. We keep the baseline values for all covariates except for `serum bilirubin` because we are interested in the association between `bilirubin` and the survival outcome in the joint model later on; so it's reasonable to use the baseline values for the other biomarkers. 
+
+### Multivariable time-dependent Cox model
+  
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+td_cox_bilir <- coxph(Surv(start, stop, event) ~ serBilir + albumin_baseline + age + edema_baseline + histologic_baseline, 
+                      data = pbc2_visit_time)
+
+# summary(td_cox_bilir)
+td_cox_bilir %>%
+  tbl_regression(exponentiate = TRUE) %>%
+  add_global_p() %>%
+  bold_labels() %>%
+  italicize_levels() %>%
+  as_kable(caption = "Final Multivariable Time-dependent Cox Model")
+```
+
+Based on the summary output, `serBilir`, the baselines for `albumin`, `histologic`, `edema` and `age` are statistically significant since their p-values are smaller than 0.05. Specifically, the very small p-values of `serBilir`, `age` indicate that there is a strong association between these variables and the survival outcome. `sex` are not statistically significant at the level of 0.05. 
+
+### Test the Proportional Hazards Assumption of Extended Cox Model
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+cox.zph(td_cox_bilir)
+```
+
+We test proportionality of all the predictors in the extended Cox model. A global p-value of 0.3113 indicates that overall, the proportionality assumption is not violated. All individual p-values are larger than the significance level of 0.05, indicating that all covariates in the extended time-dependent Cox model are proportional. 
+
+### Final multivariable model
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+final_coxFit <- coxph(Surv(years, status2) ~ serBilir + albumin + SGOT + prothrombin + age + sex + edema + histologic, data = pbc2.id)
+# summary(final_coxFit)
+final_coxFit %>%
+  tbl_regression(exponentiate = TRUE) %>%
+  add_global_p() %>%
+  bold_labels() %>%
+  italicize_levels() %>%
+  as_kable(caption = "Final Multivariable Cox Model")
+
+final_td_cox <- coxph(Surv(start, stop, event) ~ serBilir + albumin_baseline + age + sex +  edema_baseline + histologic_baseline, data = pbc2_visit_time)
+# summary(final_td_cox)
+final_td_cox %>%
+  tbl_regression(exponentiate = TRUE) %>%
+  add_global_p() %>%
+  bold_labels() %>%
+  italicize_levels() %>%
+  as_kable(caption = "Final Multivariable Time-dependent Cox Model")
+```
+
+### Longitudinal Analysis - Linear Mix-effects Model
+### Description 
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# plot
+ggplot(pbc2, aes(x = year, y = serBilir, color = factor(id))) +
+  geom_line() + geom_point() +
+  theme_bw() +
+  theme(legend.position = "none")
+
+ggplot(data = pbc2, aes(x = year, y = serBilir, group = id, color = factor(status_factor))) + 
+  geom_line() +
+  facet_grid(. ~ status_factor) +
+  ggtitle("Longitudinal trajectories of bilirubin")
+```
+
+From the spaghetti plot of levels of serum bilirubin progression overtime between alive and dead patients, it seems that alive patients tend to have a lower level of bilirubin than dead patients. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+ggplot(data = pbc2, aes(x = year, y = serBilir, group = id)) + 
+  geom_line() +
+  facet_grid(. ~ sex)
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+ggplot(data = pbc2, aes(x = year, y = serBilir, group = id)) + 
+  geom_line() +
+  facet_grid(. ~ edema)
+```
+
+### Data for LME
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# transform dataset
+pbc2_merge <- merge(pbc2.id, pbc2, by = "id", sort = FALSE)
+
+pbc2_transform <- pbc2 %>%
+  mutate(
+    serBilir = transform_serBilir,
+    serChol = log(serChol),
+    alkaline = log(alkaline), 
+    SGOT = log(SGOT),
+    platelets = log(platelets),
+    prothrombin = log(prothrombin),
+    
+    serBilir_baseline = BoxCox(pbc2_merge[,"serBilir.x"], serBilir_lambda),
+    serChol_baseline = log(pbc2_merge[,"serChol.x"]),
+    albumin_baseline = pbc2_merge[,"albumin.x"],
+    alkaline_baseline = log(pbc2_merge[,"alkaline.x"]),
+    SGOT_baseline = log(pbc2_merge[,"SGOT.x"]),
+    platelets_baseline = log(pbc2_merge[,"platelets.x"]),
+    prothrombin_baseline = log(pbc2_merge[,"prothrombin.x"]),
+    
+    ascites_baseline = pbc2_merge[,"ascites.x"],
+    hepatomegaly_baseline = pbc2_merge[,"hepatomegaly.x"],
+    spiders_baseline = pbc2_merge[,"spiders.x"],
+    edema_baseline = pbc2_merge[,"edema.x"],
+    histologic_baseline = pbc2_merge[,"histologic.x"]
+  )
+```
+
+### Data Imputation  
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# remove rows with missing values for bilirubin - response variable 
+for (i in 1:length(pbc2_transform$serBilir)) {
+  if (is.na(pbc2_transform$serBilir[i])){
+    pbc2_transform <- pbc2_transform[-c(i)]
+  }
+}
+
+# impute transformed data
+impute_missing_data <- function(patient, biomarker) {
+  result <- c()
+  result[1] <- biomarker[1]
+  for (i in 2:(length(patient))) {
+    if (is.na(biomarker[i])) {
+      biomarker[i] <- biomarker[i-1]
+    }
+    else {}
+    result[i] <- biomarker[i]
+  }
+  return(result)
+}
+
+# impute baseline data
+platelets_baseline <- impute_missing_data(pbc2_transform$id, pbc2_transform$platelets_baseline)
+pbc2_transform$platelets_baseline <- as.vector(unlist(platelets_baseline))
+
+pbc2_transform_complete_case <- pbc2_transform
+pbc2_transform_complete_case <- pbc2_transform_complete_case[!is.na(pbc2_transform_complete_case$platelets_baseline),]
+```
+
+### Univariable Analysis
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+pbc2_transform %>%
+  select(c(-years, -status, -status2, -ascites, -hepatomegaly, -spiders, -edema, -albumin, -serChol, -serBilir_baseline, 
+           serChol_baseline, -alkaline, -SGOT, -platelets, -prothrombin, -histologic, -status_factor, -serChol_baseline)) %>%
+  tbl_uvregression(
+    y = serBilir,
+    method = lme4::lmer,
+    formula = "{y} ~ {x} + (year | id)"
+  ) %>%
+  add_global_p() %>%
+  bold_labels() %>%
+  italicize_levels()
+```
+
+Based on the summary of Univariable linear mix-effects model, variable `age` and `drug` are not statistically significant at the significance level of 0.1.
+
+### Variable selection for Linear Mixed-Effect
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# backward selection
+lme_fit1 <- lmer(serBilir ~ year + ascites_baseline + sex + hepatomegaly_baseline + spiders_baseline + edema_baseline + 
+                 albumin_baseline + alkaline_baseline + SGOT_baseline + prothrombin_baseline + 
+                 histologic_baseline + platelets_baseline + (year | id), data = pbc2_transform) 
+drop1(lme_fit1, test = "Chisq") # drop edema_baseline 0.8040889    
+
+lme_fit2 <- lmer(serBilir ~ year + ascites_baseline + sex + hepatomegaly_baseline + spiders_baseline + 
+                 albumin_baseline + alkaline_baseline + SGOT_baseline + prothrombin_baseline + 
+                 histologic_baseline + platelets_baseline + (year | id), data = pbc2_transform) 
+drop1(lme_fit2, test = "Chisq") # drop platelets_baseline 0.5444112  
+
+lme_fit3 <- lmer(serBilir ~ year + ascites_baseline + sex + hepatomegaly_baseline + spiders_baseline + 
+                 albumin_baseline + alkaline_baseline + SGOT_baseline + prothrombin_baseline + 
+                 histologic_baseline + (year | id), data = pbc2_transform) 
+drop1(lme_fit3, test = "Chisq") # drop histologic_baseline 0.3581601 
+
+lme_fit4 <- lmer(serBilir ~ year + ascites_baseline + sex + hepatomegaly_baseline + spiders_baseline + 
+                 albumin_baseline + alkaline_baseline + SGOT_baseline + prothrombin_baseline + (year | id), data = pbc2_transform) 
+drop1(lme_fit4, test = "Chisq") 
+```
+
+All predictors are statistically significant except for platelets. Thus, we drop platelets from the model. 
+
+### Multivariable Linear Mixed-Effects Model
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+final_lme_fit <- lmer(serBilir ~ year + ascites_baseline + sex + hepatomegaly_baseline + spiders_baseline + 
+                 albumin_baseline + alkaline_baseline + SGOT_baseline + prothrombin_baseline + (year | id), data = pbc2_transform)
+
+final_lme_fit %>%
+  tbl_regression() %>%
+  add_global_p(include = everything()) %>%
+  bold_labels() %>%
+  italicize_levels() %>%
+  as_kable(caption = "Final Multivariable Linear Mix-Effects Model")
+
+final_lme_fit1 <- lme(serBilir ~ year + ascites_baseline + sex + hepatomegaly_baseline + spiders_baseline + 
+                 albumin_baseline + alkaline_baseline + SGOT_baseline + prothrombin_baseline, random = ~ year | id, data = pbc2_transform) 
+
+# summary(final_lme_fit1)
+summary(final_lme_fit)
+```
+
+From the summary output, all predictors are statistically significance at the significance level of 0.05. 
+
+### Diagnostic Plot
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+pbc2_transform <- pbc2_transform %>%
+    mutate(
+      residuals = summary(final_lme_fit)$residuals,
+      fitted = summary(final_lme_fit1)$fitted[,1]
+    )
+
+ggplot(data = pbc2_transform, mapping = aes(sample = residuals)) +
+    stat_qq() +
+    stat_qq_line() +
+    ggtitle("Residuals Q-Q")
+
+ggplot(data = pbc2_transform, mapping = aes(x = residuals)) +
+    geom_density() +
+    ggtitle("Residuals")
+
+ggplot(data = pbc2_transform, mapping = aes(y = residuals, x = fitted)) +
+    geom_point() +
+    ggtitle("Residuals")
+```
+
+The distribution of the residuals seems skewed left slightly, but it is not very serious. Thus, we continue with the analysis with the assumption that the normaliy condition is met. 
+
+
+### Joint Model with Serum Bilirubin as response variable
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+lme_fit_bilir <- lme(serBilir ~ year + ascites_baseline + sex + hepatomegaly_baseline + spiders_baseline + 
+                 albumin_baseline + alkaline_baseline + SGOT_baseline + prothrombin_baseline, random = ~ year | id, 
+                 data = pbc2_transform)
+```
+
+###  Variable Selection for Cox part of JM
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# drop hepatomegaly
+cox_fit_bilir1 <- coxph(Surv(years, status2) ~ albumin + alkaline + SGOT + prothrombin + age + sex + ascites +
+                         hepatomegaly + spiders + edema + histologic, data = pbc2.id, x = TRUE, model = TRUE)
+joint_fit_bilir1 <- jointModel(lme_fit_bilir, cox_fit_bilir1, timeVar = "year", method = "piecewise-PH-GH", iter.EM = 10)
+summary(joint_fit_bilir1)
+
+# drop SGOT
+cox_fit_bilir2 <- coxph(Surv(years, status2) ~ albumin + alkaline + SGOT + prothrombin + age + sex + ascites +
+                        spiders + edema + histologic, data = pbc2.id, x = TRUE, model = TRUE)
+joint_fit_bilir2 <- jointModel(lme_fit_bilir, cox_fit_bilir2, timeVar = "year", method = "piecewise-PH-GH", iter.EM = 10)
+summary(joint_fit_bilir2)
+
+# drop spiders
+cox_fit_bilir3 <- coxph(Surv(years, status2) ~ albumin + alkaline + prothrombin + age + sex + ascites +
+                        spiders + edema + histologic, data = pbc2.id, x = TRUE, model = TRUE)
+joint_fit_bilir3 <- jointModel(lme_fit_bilir, cox_fit_bilir3, timeVar = "year", method = "piecewise-PH-GH", iter.EM = 10)
+summary(joint_fit_bilir3)
+
+# drop ascites
+cox_fit_bilir4 <- coxph(Surv(years, status2) ~ albumin + alkaline + prothrombin + age + sex + ascites +
+                        edema + histologic, data = pbc2.id, x = TRUE, model = TRUE)
+joint_fit_bilir4 <- jointModel(lme_fit_bilir, cox_fit_bilir4, timeVar = "year", method = "piecewise-PH-GH", iter.EM = 10)
+summary(joint_fit_bilir4)
+
+# drop histologic
+cox_fit_bilir5 <- coxph(Surv(years, status2) ~ albumin + alkaline + prothrombin + age + sex +
+                        edema + histologic, data = pbc2.id, x = TRUE, model = TRUE)
+joint_fit_bilir5 <- jointModel(lme_fit_bilir, cox_fit_bilir5, timeVar = "year", method = "piecewise-PH-GH", iter.EM = 10)
+summary(joint_fit_bilir5)
+
+# drop sex
+cox_fit_bilir6 <- coxph(Surv(years, status2) ~ albumin + alkaline + prothrombin + age + sex + edema, data = pbc2.id, x = TRUE, model = TRUE)
+joint_fit_bilir6 <- jointModel(lme_fit_bilir, cox_fit_bilir6, timeVar = "year", method = "piecewise-PH-GH", iter.EM = 10)
+summary(joint_fit_bilir6)
+
+# drop prothrombin
+cox_fit_bilir7 <- coxph(Surv(years, status2) ~ albumin + alkaline + prothrombin + age + edema, data = pbc2.id, x = TRUE, model = TRUE)
+joint_fit_bilir7 <- jointModel(lme_fit_bilir, cox_fit_bilir7, timeVar = "year", method = "piecewise-PH-GH", iter.EM = 10)
+summary(joint_fit_bilir7)
+
+# drop alkaline
+cox_fit_bilir8 <- coxph(Surv(years, status2) ~ albumin + alkaline + age + edema, data = pbc2.id, x = TRUE, model = TRUE)
+joint_fit_bilir8 <- jointModel(lme_fit_bilir, cox_fit_bilir8, timeVar = "year", method = "piecewise-PH-GH", iter.EM = 10)
+summary(joint_fit_bilir8)
+
+# final joint model
+cox_fit_bilir9 <- coxph(Surv(years, status2) ~ albumin + age + edema, data = pbc2.id, x = TRUE, model = TRUE)
+joint_fit_bilir9 <- jointModel(lme_fit_bilir, cox_fit_bilir9, timeVar = "year", method = "piecewise-PH-GH", iter.EM = 100)
+summary(joint_fit_bilir9)
+
+# p-value for edema wit anova 1e-04
+cox_fit_bilir10 <- coxph(Surv(years, status2) ~ albumin + age, data = pbc2.id, x = TRUE, model = TRUE)
+joint_fit_bilir10 <- jointModel(lme_fit_bilir, cox_fit_bilir10, timeVar = "year", method = "piecewise-PH-GH", iter.EM = 100)
+summary(joint_fit_bilir10)
+        
+exp(confint(joint_fit_bilir, parm = "Event"))
+
+exp(1.65307287 / 3.346086)
+exp(2.01092754 / 3.346086)
+exp(2.36878221 / 3.346086)
+```
+
+Since Box Cox transformation is used, it is necessary to reverse to the original scale. With the correct inverse Box Cox transformation, one unit increase in the serum bilirubin is associated with 1.82-fold increase in the survival outcome. The 95% confidence interval is (1.64 - 2.03).
+
+### Diagnostic Tests for JM
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# Wald test and Likelihood test
+anova(joint_fit_bilir, process = "Longitudinal")
+anova(joint_fit_bilir10, joint_fit_bilir)
+
+# confidence intervals
+confint(joint_fit, parm = "Longitudinal")
+exp(confint(joint_fit, parm = "Event"))
+```
+
+The result of the Wald tests for joint model indicates a quite strong overall time effect. In the output of process Event, covariates in the survival submodel contribute in explaining the variability in the risk for death of cirrhosis patients. 
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# diagnostic for longitudinal
+par(mfrow = c(2, 2))
+plot(joint_fit)
+
+# function to produce scatteplots with superimposed smooth line
+plotResid <- function (x, y, col.loess = "black", ...) {
+    plot(x, y, ...)
+    lines(lowess(x, y), col = col.loess, lwd = 2)
+    abline(h = 0, lty = 3, col = "grey", lwd = 2)
+}
+
+res_mar <- residuals(joint_fit, process = "Longitudinal", type = "Marginal")
+fit_mar <- fitted(joint_fit, process = "Longitudinal", type = "Marginal")
+plotResid(fit_mar, res_mar, xlab = "Fitted Values", ylab = "Marginal Residuals")
+```
+
+We observe that the fitted loess curve in the plot of the standardized marginal residuals versus the fitted values shows a systematic trend with more positive residuals for small fitted values. This may be an indication that the form of the design matrix of the fixed effects X is not the appropriate one.
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# residuals for survival part: martingale residuals 
+res_mart <- residuals(joint_fit, process = "Event")
+fit_mart <- fitted(joint_fit, process = "Longitudinal", type = "EventTime")
+
+plotResid(fit_mart, res_mart, col.loess = "grey62", ylab = "Martingale Residuals",
+          xlab = "Subject-Specific Fitted Values Longitudinal Outcome")
+
+resCST <- residuals(joint_fit, process = "Event", type = "CoxSnell")
+```
+
+```{r}
+
+test <- data.frame(
+  pro = pbc2.id$prothrombin, 
+  sgot = pbc2.id$SGOT,
+  bili = pbc2.id$serBilir
+) 
+cor(test)
+
+test1 <- data.frame(
+  pro = pbc2_visit_time$prothrombin_baseline, 
+  sgot = pbc2_visit_time$SGOT_baseline,
+  bili_time = pbc2_visit_time$serBilir
+) 
+cor(test1)
+
+```
+
+
+
+
+
+
+
